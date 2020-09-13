@@ -51,6 +51,7 @@ Format: Auto | Common | All | LIST(ARCH_AND_PTX ...)
 option(USE_NCCL "Use NVidia NCCL with CUDA" OFF)
 option(USE_OPENCV "Build with OpenCV support" ON)
 option(USE_OPENMP "Build with Openmp support" ON)
+option(USE_FATBIN_COMPRESSION "Compress nvcc fatbin output" ON)
 cmake_dependent_option(USE_NVML "Build with nvml support if found" ON "USE_CUDA" OFF)
 cmake_dependent_option(USE_CUDNN "Build with cudnn support" ON "USE_CUDA" OFF) # one could set CUDNN_ROOT for search path
 cmake_dependent_option(USE_NVTX "Build with nvtx support if found" ON "USE_CUDA" OFF)
@@ -64,6 +65,7 @@ if(USE_MKL_IF_AVAILABLE AND (NOT APPLE) AND (NOT MSVC) AND (CMAKE_HOST_SYSTEM_PR
 else()
   option(USE_MKLDNN "Build with MKL-DNN support" OFF)
 endif()
+cmake_dependent_option(USE_INTGEMM "Build with x86_64 intgemm library for low-precision multiplication" ON "CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64" OFF)
 if(NOT MSVC)
   option(USE_OPERATOR_TUNING  "Enable auto-tuning of operators" ON)
 else()
@@ -262,6 +264,7 @@ if(USE_MKLDNN)
     set(MKLDNN_ENABLE_JIT_PROFILING OFF CACHE INTERNAL "" FORCE)
     set(MKLDNN_LIBRARY_TYPE STATIC CACHE INTERNAL "" FORCE)
     set(DNNL_ENABLE_CONCURRENT_EXEC ON CACHE INTERNAL "" FORCE)
+    set(DNNL_ENABLE_PRIMITIVE_CACHE ON CACHE INTERNAL "" FORCE)
 
     if(NOT USE_OPENMP)
       set(MKLDNN_CPU_RUNTIME SEQ CACHE INTERNAL "" FORCE)
@@ -276,6 +279,22 @@ if(USE_MKLDNN)
   add_definitions(-DMXNET_USE_MKLDNN=1)
   list(APPEND mxnet_LINKER_LIBS dnnl)
   set_target_properties(dnnl PROPERTIES CXX_CLANG_TIDY "")  # don't lint 3rdparty dependency
+endif()
+
+if(USE_INTGEMM)
+  message(STATUS "Using intgemm")
+  include(FetchContent)
+  FetchContent_Declare(
+    intgemm
+    GIT_REPOSITORY https://github.com/kpu/intgemm.git
+    GIT_TAG        02f671cf537fdbc818cf8111d1d9e557a8650d7a
+  )
+  FetchContent_GetProperties(intgemm)
+  if(NOT intgemm_POPULATED)
+    FetchContent_Populate(intgemm)
+  endif()
+  add_subdirectory(${intgemm_SOURCE_DIR} ${intgemm_BINARY_DIR} EXCLUDE_FROM_ALL)
+  add_definitions(-DMXNET_USE_INTGEMM=1)
 endif()
 
 # Allow Cuda compiles outside of src tree to find things in 'src' and 'include'
@@ -474,6 +493,11 @@ endif()
 FILE(GLOB_RECURSE SOURCE "src/*.cc" "src/*.h" "include/*.h")
 FILE(GLOB_RECURSE CUDA "src/*.cu" "src/*.cuh")
 
+if(NOT USE_INTGEMM)
+  FILE(GLOB_RECURSE INTGEMM_OPERATOR_SOURCE "src/operator/contrib/intgemm/*.cc" "src/operator/contrib/intgemm/*.h")
+  list(REMOVE_ITEM SOURCE ${INTGEMM_OPERATOR_SOURCE})
+endif()
+
 # add nnvm to source
 FILE(GLOB_RECURSE NNVMSOURCE
   3rdparty/tvm/nnvm/src/c_api/*.cc
@@ -609,6 +633,10 @@ endif()
 # Add cmake targets
 add_subdirectory("3rdparty/mshadow")
 
+if(USE_CUDA AND USE_FATBIN_COMPRESSION)
+  string(APPEND CMAKE_CUDA_FLAGS "--fatbin-options -compress-all ")
+  message("-- CUDA: Adding NVCC options: --fatbin-options -compress-all ")
+endif()
 if(UNIX)
   string(APPEND CMAKE_CUDA_FLAGS " ${CUDA_ARCH_FLAGS_SPACES}")
   # Create dummy file since we want an empty shared library before linking
@@ -700,19 +728,20 @@ endif()
 target_compile_definitions(mxnet PUBLIC DMLC_LOG_FATAL_THROW=$<BOOL:${LOG_FATAL_THROW}>)
 
 # extension libraries (custom operators, custom subgraphs) are built by default
-add_library(customop_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/gemm_lib.cc)
-add_library(transposecsr_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/transposecsr_lib.cc)
-add_library(transposerowsp_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/transposerowsp_lib.cc)
-add_library(subgraph_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_subgraph/subgraph_lib.cc)
-add_library(pass_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_pass/pass_lib.cc)
+add_library(customop_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/gemm_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+add_library(transposecsr_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/transposecsr_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+add_library(transposerowsp_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/transposerowsp_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+add_library(subgraph_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_subgraph/subgraph_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+add_library(pass_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_pass/pass_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+
 target_include_directories(customop_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
 target_include_directories(transposecsr_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
 target_include_directories(transposerowsp_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
 target_include_directories(subgraph_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
 target_include_directories(pass_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
 if(USE_CUDA)
-  add_library(customop_gpu_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/relu_lib.cu)
-  target_include_directories(customop_gpu_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet)
+  add_library(customop_gpu_lib SHARED ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/relu_lib.cu ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op/relu_lib.cc ${CMAKE_CURRENT_SOURCE_DIR}/src/lib_api.cc)
+  target_include_directories(customop_gpu_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/mxnet ${CMAKE_CURRENT_SOURCE_DIR}/example/extensions/lib_custom_op)
 endif()
 if(UNIX)
   if (USE_CUDA)
@@ -730,7 +759,9 @@ elseif(MSVC)
   set_target_properties(subgraph_lib PROPERTIES PREFIX "lib")
   set_target_properties(pass_lib PROPERTIES PREFIX "lib")
   if(USE_CUDA)
-    target_compile_options(customop_gpu_lib PUBLIC "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>")
+    target_compile_options(customop_gpu_lib PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-LD -MT>")
+    target_compile_options(customop_gpu_lib PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/LD>")
+    target_compile_options(customop_gpu_lib PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MT>")
     set_target_properties(customop_gpu_lib PROPERTIES PREFIX "lib")
   endif()
 endif()
@@ -748,6 +779,10 @@ if(USE_MKLDNN)
       ${CMAKE_BINARY_DIR}/3rdparty/mkldnn/include/dnnl_config.h  ${CMAKE_SOURCE_DIR}/include/mkldnn/
       COMMAND ${CMAKE_COMMAND} -E copy
       ${CMAKE_BINARY_DIR}/3rdparty/mkldnn/include/dnnl_version.h  ${CMAKE_SOURCE_DIR}/include/mkldnn/)
+endif()
+
+if(USE_INTGEMM)
+  target_link_libraries(mxnet PRIVATE intgemm)
 endif()
 
 function(BuildTVMOP)

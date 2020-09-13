@@ -1093,6 +1093,28 @@ void registerOperators(void *lib, int verbose, mxnet::ext::msgSize_t msgSize,
         attr_vals.push_back(kv.second.c_str());
       }
 
+      // string repr of supported context for custom library, currently only "cpu" and "gpu"
+      const char* ctx_str = ctx.dev_mask() == Context::kCPU ? "cpu" : "gpu";
+
+      std::vector<uint32_t*> inshapes(in_shapes.size());
+      std::vector<int> indims(in_shapes.size());
+
+      // determine amount of memory needed to store all the input shapes
+      size_t buff_size = 0;
+      for (size_t i = 0; i < in_shapes.size(); ++i)
+        buff_size += in_shapes[i].ndim();
+
+      // copy input shapes to raw memory layout
+      std::vector<uint32_t> inbuff(buff_size);
+      uint32_t *ptr = inbuff.data();
+      for (size_t i = 0; i < in_shapes.size(); ++i) {
+        inshapes[i] = ptr;
+        indims[i] = in_shapes[i].ndim();
+        for (int j = 0; j < in_shapes[i].ndim(); ++j, ++ptr) {
+          *ptr = static_cast<uint32_t>(in_shapes[i][j]);
+        }
+      }
+
       // convert subgraph symbol from node attributes to char*
       std::string subgraph_json;
       if (!attrs.subgraphs.empty()) {
@@ -1111,7 +1133,9 @@ void registerOperators(void *lib, int verbose, mxnet::ext::msgSize_t msgSize,
         CHECK(createop_map.count("cpu") > 0)
           << "CPU CreateOpState not implemented for '" << name_str << "'";
         int retval = callCreateOpState(createop_map.at("cpu"), attr_keys.data(), attr_vals.data(),
-                                       attr_keys.size(), &state_op_inst);
+                                       attr_keys.size(), ctx_str, ctx.real_dev_id(),
+                                       inshapes.data(), indims.data(),
+                                       in_shapes.size(), in_types.data(), &state_op_inst);
         std::string msgs = getExtensionMsgs(msgSize, msgGet);
         CHECK(retval) << "Error calling CreateOpState CPU for custom operator '" << name_str << "'"
                       << msgs;
@@ -1119,7 +1143,9 @@ void registerOperators(void *lib, int verbose, mxnet::ext::msgSize_t msgSize,
         CHECK(createop_map.count("gpu") > 0)
           << "GPU CreateOpState not implemented for '" << name_str << "'";
         int retval = callCreateOpState(createop_map.at("gpu"), attr_keys.data(), attr_vals.data(),
-                                       attr_keys.size(), &state_op_inst);
+                                       attr_keys.size(), ctx_str, ctx.real_dev_id(),
+                                       inshapes.data(), indims.data(),
+                                       in_shapes.size(), in_types.data(), &state_op_inst);
         std::string msgs = getExtensionMsgs(msgSize, msgGet);
         CHECK(retval) << "Error calling CreateOpState GPU for custom operator '" << name_str << "'"
         << msgs;
@@ -1462,15 +1488,15 @@ void registerPasses(void *lib, int verbose, mxnet::ext::msgSize_t msgSize,
  * \brief Loads dynamic custom library and initializes it
  * \param path library path
  */
-int MXLoadLib(const char *path, unsigned verbose) {
+int MXLoadLib(const char *path, unsigned verbose, void** lib) {
   API_BEGIN();
-  void *lib = LibraryInitializer::Get()->lib_load(path);
-  if (!lib)
+  *lib = LibraryInitializer::Get()->lib_load(path);
+  if (!*lib)
     LOG(FATAL) << "Unable to load library";
 
   // check that library and MXNet use same version of library API
   mxnet::ext::opVersion_t opVersion =
-    get_func<mxnet::ext::opVersion_t>(lib, const_cast<char*>(MXLIB_OPVERSION_STR));
+    get_func<mxnet::ext::opVersion_t>(*lib, const_cast<char*>(MXLIB_OPVERSION_STR));
   int libVersion =  opVersion();
   if (MX_LIBRARY_VERSION != libVersion)
     LOG(FATAL) << "Library version (" << libVersion << ") does not match MXNet version ("
@@ -1478,22 +1504,22 @@ int MXLoadLib(const char *path, unsigned verbose) {
 
   // get error messaging APIs
   mxnet::ext::msgSize_t msgSize =
-    get_func<mxnet::ext::msgSize_t>(lib, const_cast<char*>(MXLIB_MSGSIZE_STR));
+    get_func<mxnet::ext::msgSize_t>(*lib, const_cast<char*>(MXLIB_MSGSIZE_STR));
   mxnet::ext::msgGet_t msgGet =
-    get_func<mxnet::ext::msgGet_t>(lib, const_cast<char*>(MXLIB_MSGGET_STR));
+    get_func<mxnet::ext::msgGet_t>(*lib, const_cast<char*>(MXLIB_MSGGET_STR));
 
   // initialize library by passing MXNet version
   mxnet::ext::initialize_t initialize =
-    get_func<mxnet::ext::initialize_t>(lib, const_cast<char*>(MXLIB_INITIALIZE_STR));
+    get_func<mxnet::ext::initialize_t>(*lib, const_cast<char*>(MXLIB_INITIALIZE_STR));
   if (!initialize(static_cast<int>(MXNET_VERSION))) {
     std::string msgs = getExtensionMsgs(msgSize, msgGet);
     LOG(FATAL) << "Library failed to initialize" << msgs;
   }
 
   // find ops, partitioners, and passes in library
-  registerOperators(lib, verbose, msgSize, msgGet);
-  registerPartitioners(lib, verbose, msgSize, msgGet);
-  registerPasses(lib, verbose, msgSize, msgGet);
+  registerOperators(*lib, verbose, msgSize, msgGet);
+  registerPartitioners(*lib, verbose, msgSize, msgGet);
+  registerPasses(*lib, verbose, msgSize, msgGet);
   API_END();
 }
 

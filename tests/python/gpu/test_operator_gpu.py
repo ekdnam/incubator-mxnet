@@ -24,6 +24,8 @@ import mxnet as mx
 import numpy as np
 import pytest
 import itertools
+import scipy.sparse as sps
+import mxnet.ndarray.sparse as mxsps
 from mxnet.test_utils import check_consistency, set_default_context, assert_almost_equal, assert_allclose
 from mxnet.test_utils import check_symbolic_forward, check_symbolic_backward, discard_stderr
 from mxnet.test_utils import default_context, rand_shape_2d, rand_ndarray, same, environment
@@ -1662,7 +1664,7 @@ def test_deformable_convolution_with_type():
     tol = {np.dtype(np.float32): 1e-1,
            np.dtype(np.float64): 1e-3}
 
-    sym = mx.sym.contrib.DeformableConvolution(num_filter=3, kernel=(3,3), name='deformable_conv')
+    sym = mx.sym.npx.deformable_convolution(num_filter=3, kernel=(3,3), name='deformable_conv')
     # since atomicAdd does not support fp16 (which deformable conv uses in backward), we do not test fp16 here
     ctx_list = [{'ctx': mx.gpu(0),
                  'deformable_conv_data': (2, 2, 10, 10),
@@ -1716,7 +1718,7 @@ def test_deformable_convolution_options():
                  'deformable_conv_offset': (2, 18, 7, 7),
                  'type_dict': {'deformable_conv_data': np.float32, 'deformable_conv_offset': np.float32}},
                 ]
-    sym = mx.sym.contrib.DeformableConvolution(num_filter=3, kernel=(3,3), pad=(1,1), name='deformable_conv')
+    sym = mx.sym.npx.deformable_convolution(num_filter=3, kernel=(3,3), pad=(1,1), name='deformable_conv')
     check_consistency(sym, ctx_list, scale=0.1, rtol=tol, atol=tol)
 
     # Stride > 1
@@ -1737,7 +1739,7 @@ def test_deformable_convolution_options():
                  'deformable_conv_offset': (2, 18, 3, 3),
                  'type_dict': {'deformable_conv_data': np.float32, 'deformable_conv_offset': np.float32}},
                 ]
-    sym = mx.sym.contrib.DeformableConvolution(num_filter=3, kernel=(3,3), stride=(2,2), name='deformable_conv')
+    sym = mx.sym.npx.deformable_convolution(num_filter=3, kernel=(3,3), stride=(2,2), name='deformable_conv')
     check_consistency(sym, ctx_list, scale=0.1, rtol=tol, atol=tol)
 
     # Dilate > 1
@@ -1758,7 +1760,7 @@ def test_deformable_convolution_options():
                  'deformable_conv_offset': (2, 18, 3, 3),
                  'type_dict': {'deformable_conv_data': np.float32, 'deformable_conv_offset': np.float32}},
                 ]
-    sym = mx.sym.contrib.DeformableConvolution(num_filter=3, kernel=(3,3), dilate=(2,2), name='deformable_conv')
+    sym = mx.sym.npx.deformable_convolution(num_filter=3, kernel=(3,3), dilate=(2,2), name='deformable_conv')
     check_consistency(sym, ctx_list, scale=0.1, rtol=tol, atol=tol)
 
     # Deformable group > 1
@@ -1779,7 +1781,7 @@ def test_deformable_convolution_options():
                  'deformable_conv_offset': (2, 36, 5, 5),
                  'type_dict': {'deformable_conv_data': np.float32, 'deformable_conv_offset': np.float32}},
                 ]
-    sym = mx.sym.contrib.DeformableConvolution(num_filter=4, kernel=(3,3), num_deformable_group=2, name='deformable_conv')
+    sym = mx.sym.npx.deformable_convolution(num_filter=4, kernel=(3,3), num_deformable_group=2, name='deformable_conv')
     check_consistency(sym, ctx_list, scale=0.1, rtol=tol, atol=tol)
 
 
@@ -2308,3 +2310,12 @@ def test_arange_like_dtype():
         for v in out:
             assert v.dtype == t
 
+
+def test_fp16_spmm():
+    inp = mxsps.csr_matrix(sps.coo_matrix(([2.0], ([150], [100000]))).tocsr())
+    inp = inp.astype('float16', copy=False)
+    weight = mx.nd.random.randn(100001, 151)
+    weight = weight.astype('float16', copy=False)
+    out = mxsps.dot(inp, weight)
+    out_np = mx.nd.dot(inp, weight)
+    assert_almost_equal(out.asnumpy(), out_np, rtol=1e-3, atol=1e-5)

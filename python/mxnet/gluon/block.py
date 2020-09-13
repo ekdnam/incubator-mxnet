@@ -947,8 +947,8 @@ class HybridBlock(Block):
                     flatten_inputs.append(None)
             grouped_inputs = _regroup(flatten_inputs, self._in_format)
 
-            params = {i: j.var() for i, j in self._reg_params.items()}
             with _block_scope(self):
+                params = {i: j.var() for i, j in self._reg_params.items()}
                 out = self.hybrid_forward(symbol, *grouped_inputs, **params)  # pylint: disable=no-value-for-parameter
             out, self._out_format = _flatten(out, "output")
 
@@ -1348,8 +1348,11 @@ class HybridBlock(Block):
                 if name in arg_names:
                     arg_dict['arg:{}'.format(name)] = param._reduce()
                 else:
-                    assert name in aux_names
-                    arg_dict['aux:{}'.format(name)] = param._reduce()
+                    if name not in aux_names:
+                        warnings.warn('Parameter "{name}" is not found in the graph. '
+                                      .format(name=name), stacklevel=3)
+                    else:
+                        arg_dict['aux:%s'%name] = param._reduce()
         save_fn = _mx_npx.save if is_np_array() else ndarray.save
         params_filename = '%s-%04d.params'%(path, epoch)
         save_fn(params_filename, arg_dict)
@@ -1408,7 +1411,8 @@ class HybridBlock(Block):
                 # HybridBlock is a child block of a HybridBlock that has been hybridized.
                 return super().__call__(x, *args)
 
-            return self._call_cached_op(x, *args)
+            with x.ctx:
+                return self._call_cached_op(x, *args)
 
     def forward(self, x, *args):
         """Defines the forward computation. Arguments can be either
@@ -1444,8 +1448,8 @@ class HybridBlock(Block):
 
                 return self.hybrid_forward(ndarray, x, *args, **params)
 
-        params = {i: j.var() for i, j in self._reg_params.items()}
         with _block_scope(self):
+            params = {i: j.var() for i, j in self._reg_params.items()}
             return self.hybrid_forward(symbol, x, *args, **params)
 
     def hybrid_forward(self, F, x, *args, **kwargs):

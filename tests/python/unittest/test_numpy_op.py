@@ -3030,12 +3030,14 @@ def test_np_binary_funcs():
         'bitwise_and': (-100, 100, [None], None, [[_np.int32]]),
         'bitwise_xor': (-100, 100, [None], None, [[_np.int32]]),
         'bitwise_or': (-100, 100, [None], None, [[_np.int32]]),
-        'maximum': (-1, 1, [lambda y, x1, x2: _np.ones(y.shape) * (x1 >= x2)],
-                           [lambda y, x1, x2: _np.ones(y.shape) * (x1 < x2)]),
+        'maximum': (-10, 10, [lambda y, x1, x2: _np.ones(y.shape) * (x1 >= x2)],
+                             [lambda y, x1, x2: _np.ones(y.shape) * (x1 < x2)],
+                             [[_np.int32, _np.float16, _np.float32, _np.float64]]),
         'fmax': (-1, 1, [lambda y, x1, x2: _np.ones(y.shape) * (x1 >= x2)],
                         [lambda y, x1, x2: _np.ones(y.shape) * (x1 < x2)]),
-        'minimum': (-1, 1, [lambda y, x1, x2: _np.ones(y.shape) * (x1 <= x2)],
-                           [lambda y, x1, x2: _np.ones(y.shape) * (x1 > x2)]),
+        'minimum': (-10, 10, [lambda y, x1, x2: _np.ones(y.shape) * (x1 <= x2)],
+                             [lambda y, x1, x2: _np.ones(y.shape) * (x1 > x2)],
+                             [[_np.int32, _np.float16, _np.float32, _np.float64]]),
         'fmin': (-1, 1, [lambda y, x1, x2: _np.ones(y.shape) * (x1 <= x2)],
                         [lambda y, x1, x2: _np.ones(y.shape) * (x1 > x2)]),
         'copysign': (-1, 1,
@@ -8429,19 +8431,28 @@ def test_np_pad():
             assert_almost_equal(mx_out.asnumpy(), np_out, rtol = rtol, atol = atol)
 
             # test gradient
-            mx_out.backward()
-            np_backward = np.ones(shape)
-            assert_almost_equal(x.grad.asnumpy(), np_backward, rtol=rtol, atol=atol)
-
-            # test imperative once again
-
-            if(m != 'constant'):
-                np_out = _np.pad(x.asnumpy(), pw, mode=m)
-                mx_out = np.pad(x, pw, mode=m)
-            else:
-                np_out = _np.pad(x.asnumpy(), pw, constant_values=0, mode=m)
-                mx_out = np.pad(x, pw, mode=m, constant_values=0)
-            assert_almost_equal(mx_out.asnumpy(), np_out, rtol=rtol, atol=atol)
+            if m == "constant":
+                ctx = mx.context.current_context()
+                x = mx.np.random.uniform(-1.0, 1.0, size=shape)
+                x = mx.np.array(x, ctx=ctx)
+                for grad_req in ['write', 'add']:
+                    x.attach_grad(grad_req)
+                    if grad_req == 'add':
+                        init_grad = mx.np.random.uniform(-1.0, 1.0, size=shape, ctx=ctx)
+                        x.grad[:] = init_grad
+                    with mx.autograd.record():
+                        mx_out = mx.np.pad(x, pad_width=pw, mode="constant")
+                        out_grad = mx.np.random.normal(0, 1, mx_out.shape)
+                        out_grad = mx.np.array(out_grad, ctx=ctx)
+                        loss = mx_out * out_grad
+                        loss = loss.sum()
+                        loss.backward()
+                    gt_in_grad = mx.np.pad(mx.np.ones_like(x.grad), pad_width=pw, mode="constant") * mx.np.array(out_grad, ctx=ctx)
+                    mx_grad = x.grad
+                    if grad_req == 'add':
+                        assert_almost_equal(mx.np.pad(mx_grad - init_grad, pad_width=pw, mode="constant"), gt_in_grad.asnumpy(), rtol=rtol, atol=atol)
+                    else:
+                        assert_almost_equal(mx.np.pad(mx_grad, pad_width=pw, mode="constant"), gt_in_grad.asnumpy(), rtol=rtol, atol=atol)
 
 
 @with_seed()
@@ -10315,3 +10326,42 @@ def test_np_broadcast_ops_on_misaligned_input_oneside(dtype, lead_dim, both_ways
     expected = c.asnumpy() + d.asnumpy()
     mx.nd.waitall()
     assert_almost_equal(f, expected)
+
+@with_seed()
+@use_np
+@pytest.mark.parametrize('num_batch', [1, 2])
+@pytest.mark.parametrize('num_channel_data', [4, 8])
+@pytest.mark.parametrize('num_deformable_group', [1, 2])
+@pytest.mark.parametrize('input_height', [5, 6])
+@pytest.mark.parametrize('input_width', [5, 6])
+@pytest.mark.parametrize('dilate', [(1, 1), (2, 2)])
+@pytest.mark.parametrize('grad_nodes', [['im_data'], ['offset_data'], ['weight']])
+def test_modulated_deformable_convolution(num_batch, num_channel_data, num_deformable_group,
+                                          input_height, input_width, dilate, grad_nodes):
+    output_height = input_height
+    output_width = input_width
+    im_data = np.random.rand(num_batch, num_channel_data, input_height, input_width)
+    offset_data = \
+        np.random.rand(num_batch, num_deformable_group * 3 * 3 * 2, output_height, output_width)\
+        * 0.8 + 0.1
+    mask_data = np.random.rand(num_batch, num_deformable_group * 3 * 3, output_height, output_width)
+    mask_data = 0.5 * (1 + np.tanh(0.5 * mask_data)) # sigmoid
+    weight = np.random.normal(0, 0.001, (num_channel_data, num_channel_data, 3, 3))
+    bias = np.zeros(num_channel_data)
+
+    im_data_var = mx.symbol.Variable(name="im_data").as_np_ndarray()
+    offset_data_var = mx.symbol.Variable(name="offset_data").as_np_ndarray()
+    mask_data_var = mx.symbol.Variable(name="mask_data").as_np_ndarray()
+    weight_var = mx.symbol.Variable(name="weight").as_np_ndarray()
+    bias_var = mx.symbol.Variable(name="bias").as_np_ndarray()
+    op = mx.sym.npx.modulated_deformable_convolution(name='test_op', data=im_data_var,
+                                                     offset=offset_data_var, mask=mask_data_var,
+                                                     weight=weight_var, bias=bias_var,
+                                                     num_filter=num_channel_data, pad=dilate,
+                                                     kernel=(3, 3), stride=(1, 1), dilate=dilate,
+                                                     num_deformable_group=num_deformable_group)
+    if grad_nodes[0] == 'offset_data':
+        # wider tolerance needed for coordinate differential
+        rtol, atol = 1.0, 1e-2
+    else:
+        rtol, atol = 0.05, 1e-3

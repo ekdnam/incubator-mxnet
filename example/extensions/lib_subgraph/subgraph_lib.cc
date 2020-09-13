@@ -27,7 +27,7 @@
 #include <iostream>
 #include <algorithm>
 #include <utility>
-#include "lib_api.h"
+#include "mxnet/lib_api.h"
 
 using namespace mxnet::ext;
 
@@ -156,6 +156,9 @@ class MyStatefulOp : public CustomStatefulOp {
 };
 
 MXReturnValue createOpState(const std::unordered_map<std::string, std::string>& attrs,
+                            const MXContext& ctx,
+                            const std::vector<std::vector<unsigned int> >& in_shapes,
+                            const std::vector<int> in_types,
                             CustomStatefulOp** op_inst) {
   std::string serialized_subgraph = "[empty]";
   // MXNet subgraph is stored as Symbol in operator node attrs subgraphs field
